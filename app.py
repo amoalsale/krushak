@@ -238,13 +238,13 @@ def generate_pdf_bytes(df_rows, total_taxable, total_cgst, total_sgst, rounded_t
     <head>
         <meta charset="utf-8">
         <style>
-            @page {{ size: A4; margin: 10mm; }}
-            body {{ font-family: Helvetica, Arial, sans-serif; font-size: 8pt; color: #333; line-height: 1.2; }}
+            @page {{ size: A4 landscape; margin: 8mm; }}
+            body {{ font-family: Helvetica, Arial, sans-serif; font-size: 7.5pt; color: #333; line-height: 1.2; }}
             .title {{ text-align: center; font-size: 15pt; font-weight: bold; color: #1a365d; margin-bottom: 2px; }}
             .subtitle {{ text-align: center; font-size: 8pt; font-style: italic; color: #555; margin-bottom: 10px; }}
-            table {{ width: 100%; border-collapse: collapse; margin-top: 6px; }}
-            th {{ background-color: #1a365d; color: white; font-weight: bold; font-size: 7.5pt; padding: 4px; border: 1px solid #1a365d; }}
-            td {{ border: 1px solid #cbd5e0; padding: 3.5px; font-size: 7.5pt; }}
+            table {{ width: 100%; table-layout: fixed; border-collapse: collapse; margin-top: 6px; }}
+            th {{ background-color: #1a365d; color: white; font-weight: bold; font-size: 7pt; padding: 3px; border: 1px solid #1a365d; word-wrap: break-word; overflow-wrap: break-word; }}
+            td {{ border: 1px solid #cbd5e0; padding: 2.5px; font-size: 7pt; word-wrap: break-word; overflow-wrap: break-word; }}
             .summary-th {{ background-color: #2d3748; color: white; }}
             .bold {{ font-weight: bold; }}
             .box {{ border: 1px solid #cbd5e0; padding: 6px; margin-bottom: 8px; }}
@@ -285,6 +285,20 @@ def generate_pdf_bytes(df_rows, total_taxable, total_cgst, total_sgst, rounded_t
         </table>
 
         <table>
+            <colgroup>
+                <col style="width: 4%;">
+                <col style="width: 28%;">
+                <col style="width: 7%;">
+                <col style="width: 6%;">
+                <col style="width: 5%;">
+                <col style="width: 8%;">
+                <col style="width: 9%;">
+                <col style="width: 5%;">
+                <col style="width: 7%;">
+                <col style="width: 5%;">
+                <col style="width: 7%;">
+                <col style="width: 9%;">
+            </colgroup>
             <thead>
                 <tr>
                     <th style="width: 4%;">S.No</th>
