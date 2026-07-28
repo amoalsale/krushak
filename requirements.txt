@@ -1,0 +1,6 @@
+streamlit
+pandas
+pdfplumber
+pypdf
+weasyprint
+xhtml2pdf
