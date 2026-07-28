@@ -1,2 +1,4 @@
 weasyprint
 fonts-liberation
+fonts-lohit-deva-marathi
+fonts-noto-core

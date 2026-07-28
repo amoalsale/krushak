@@ -239,7 +239,7 @@ def generate_pdf_bytes(df_rows, total_taxable, total_cgst, total_sgst, rounded_t
         <meta charset="utf-8">
         <style>
             @page {{ size: A4 landscape; margin: 8mm; }}
-            body {{ font-family: Helvetica, Arial, sans-serif; font-size: 7.5pt; color: #333; line-height: 1.2; }}
+            body {{ font-family: "Noto Sans", Helvetica, Arial, "Lohit Devanagari", "Lohit Marathi", sans-serif; font-size: 7.5pt; color: #333; line-height: 1.2; }}
             .title {{ text-align: center; font-size: 15pt; font-weight: bold; color: #1a365d; margin-bottom: 2px; }}
             .subtitle {{ text-align: center; font-size: 8pt; font-style: italic; color: #555; margin-bottom: 10px; }}
             table {{ width: 100%; table-layout: fixed; border-collapse: collapse; margin-top: 6px; }}
