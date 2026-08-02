@@ -1,7 +1,6 @@
 streamlit
 pandas
-pdfplumber
-pypdf
+openpyxl
 weasyprint
 xhtml2pdf
 requests

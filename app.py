@@ -1,14 +1,11 @@
 import streamlit as st
 import pandas as pd
-import pdfplumber
-import re
 import difflib
 import io
 import json
 import os
 import base64
 import requests
-import pypdf
 
 # -----------------------------------------------------------------------------
 # 1. PAGE CONFIGURATION & STYLING
@@ -184,105 +181,113 @@ def load_price_master(url):
         return None
 
 # -----------------------------------------------------------------------------
-# 4. MULTI-COLUMN PDF PARSING ENGINE
+# 4. PACKAGING REPORT XLSX PARSER
 # -----------------------------------------------------------------------------
 
-def parse_pdf_items(uploaded_file):
-    """
-    Extracts ALL Item Names and Quantities across multi-column rows.
-    Handles lines containing multiple items like: "Item A 10  Item B 20  Item C 5"
-    """
+def parse_xlsx_items(uploaded_file):
+    """Extracts Item Names and Quantities from a packaging-report XLSX/XLS
+    export with 'Product' and 'Quantity' columns."""
     uploaded_file.seek(0)
-    text = ""
-    
-    # 1. Extract text using pypdf (or pdfplumber fallback)
-    try:
-        reader = pypdf.PdfReader(uploaded_file)
-        for page in reader.pages:
-            page_text = page.extract_text()
-            if page_text:
-                text += page_text + "\n"
-    except Exception:
-        uploaded_file.seek(0)
-        with pdfplumber.open(uploaded_file) as pdf:
-            for page in pdf.pages:
-                page_text = page.extract_text()
-                if page_text:
-                    text += page_text + "\n"
+    df = pd.read_excel(uploaded_file)
 
-    # 2. Pre-clean layout artifacts
-    text = text.replace("order = 40", "order 40")
-    text = text.replace("retail = 2", "retail 2")
-    text = text.replace("(0.5 Kg Each)", "")
-    text = re.sub(r"Combo Chilly\s*\(.*?\)\s*(\d+)", r"Combo Chilly \1", text)
-    
+    product_col = next(
+        (c for c in df.columns if str(c).strip().lower() == "product"), df.columns[0]
+    )
+    qty_col = next(
+        (c for c in df.columns if str(c).strip().lower() == "quantity"), df.columns[1]
+    )
+
     extracted = []
-    lines = text.split("\n")
-    
-    for line in lines:
-        line_str = line.strip().strip("|")
-        if not line_str:
+    for _, row in df.iterrows():
+        name, qty = row[product_col], row[qty_col]
+        if pd.isna(name) or pd.isna(qty):
             continue
-            
-        # Regex matches ALL [Item Name] followed by [Quantity Digits] on the line
-        raw_matches = re.findall(r"([^\d]+?)\s*[:=]?\s*(\d+)", line_str)
-        
-        for name, qty in raw_matches:
-            name_clean = name.strip().strip("|")
-            
-            # Clean leading/trailing punctuation & special chars
-            name_clean = re.sub(r"^[^\w\u0900-\u097F]+", "", name_clean)
-            name_clean = re.sub(r"[^\w\u0900-\u097F)]+$", "", name_clean).strip()
-            
-            # Skip noise tokens (including bare unit words that get split off as
-            # if they were their own item, e.g. a stray "KG O" fragment)
-            noise_tokens = [
-                'order', 'retail', 'gm+less', 'gm', 'gms', 'piece punnet', 'kg each',
-                'rs', 'total', 'kg', 'kgs', 'kg o', 'pcs', 'ltr', 'ltrs', 'litre',
-                'litres', 'dozen', 'bunch', 'bottle', 'packet', 'bag', 'punnet', 'box'
-            ]
-            if name_clean.lower() in noise_tokens:
-                continue
-                
+        name_clean = str(name).strip()
+        try:
             qty_int = int(qty)
-            if len(name_clean) > 1 and qty_int > 0:
-                extracted.append({"raw_name": name_clean, "qty": qty_int})
-                
+        except (TypeError, ValueError):
+            continue
+        if len(name_clean) > 1 and qty_int > 0:
+            extracted.append({"raw_name": name_clean, "qty": qty_int})
+
     return extracted
 # -----------------------------------------------------------------------------
 # 5. BILINGUAL SMART ITEM MATCHER
 # -----------------------------------------------------------------------------
-def find_best_match(query, master_list):
-    """Bilingual (Marathi/English) matching logic for truncated PDF text."""
-    if not query:
-        return None
-        
-    q_clean = query.strip().lower().replace(" ", "").replace("/", "").replace("-", "")
-    
-    # 1. Exact or containment match
+def _norm(s):
+    return str(s).strip().lower().replace(" ", "").replace("/", "").replace("-", "")
+
+def _score_candidates(query, master_list):
+    """Finds the single best-scoring master-list candidate for `query`,
+    regardless of any acceptance threshold. Returns (best_item, best_ratio) -
+    best_item is None with best_ratio 0.0 only if master_list is empty or no
+    candidate could be found at all (not even a loose fuzzy one).
+
+    Candidates are pooled from exact match, substring containment, sub-part
+    containment, and fuzzy search, then ranked by overall similarity - rather
+    than returning the first containment hit - so a short common word (e.g.
+    "कांदा"/onion) embedded inside an unrelated longer product name can't
+    shadow a much better match elsewhere in the list.
+    """
+    if not query or not master_list:
+        return None, 0.0
+
+    q_clean = _norm(query)
+
+    # 1. Exact match short-circuits immediately.
     for item in master_list:
-        i_clean = str(item).strip().lower().replace(" ", "").replace("/", "").replace("-", "")
+        if _norm(item) == q_clean:
+            return item, 1.0
+
+    candidates = []
+
+    # 2. Containment either direction.
+    for item in master_list:
+        i_clean = _norm(item)
         if q_clean in i_clean or i_clean in q_clean:
-            return item
-            
-    # 2. Sub-part match (e.g. Marathi part before '/' or English part after '/')
+            candidates.append(item)
+
+    # 3. Sub-part containment (e.g. Marathi part before '/' or English part after '/')
     parts = [p.strip() for p in query.split("/") if p.strip()]
     for p in parts:
         p_sub = p.lower()
         if len(p_sub) > 2:
             for item in master_list:
-                if p_sub in str(item).lower():
-                    return item
-                    
-    # 3. Fuzzy match fallback (skip very short/ambiguous fragments, which are
+                if p_sub in str(item).lower() and item not in candidates:
+                    candidates.append(item)
+
+    # 4. Fuzzy candidates (skip very short/ambiguous fragments, which are
     # prone to matching unrelated products on noise like stray unit tokens)
-    if len(query.strip()) < 3:
-        return None
-    matches = difflib.get_close_matches(query, [str(m) for m in master_list], n=1, cutoff=0.4)
-    if matches:
-        return matches[0]
-        
-    return None
+    if len(query.strip()) >= 3:
+        for fm in difflib.get_close_matches(query, [str(m) for m in master_list], n=5, cutoff=0.3):
+            if fm not in candidates:
+                candidates.append(fm)
+
+    # 5. If still nothing, fall back to whatever difflib considers globally
+    # closest (even a poor match) purely so callers can explain *why* a
+    # match failed - this is never used to accept a match.
+    if not candidates:
+        closest = difflib.get_close_matches(query, [str(m) for m in master_list], n=1, cutoff=0.0)
+        if not closest:
+            return None, 0.0
+        candidates = closest
+
+    best_item, best_ratio = None, -1.0
+    for item in candidates:
+        ratio = difflib.SequenceMatcher(None, q_clean, _norm(item)).ratio()
+        if ratio > best_ratio:
+            best_item, best_ratio = item, ratio
+
+    return best_item, best_ratio
+
+MATCH_CUTOFF = 0.75
+
+def find_best_match(query, master_list, cutoff=MATCH_CUTOFF):
+    """Bilingual (Marathi/English) matching logic against the price master.
+    Returns the best-scoring candidate only if it clears `cutoff`; anything
+    weaker is treated as unmatched rather than guessed."""
+    best_item, best_ratio = _score_candidates(query, master_list)
+    return best_item if best_ratio >= cutoff else None
 
 # -----------------------------------------------------------------------------
 # 6. NUMBER TO WORDS CONVERTER
@@ -525,20 +530,19 @@ def generate_pdf_bytes(df_rows, total_taxable, total_cgst, total_sgst, rounded_t
 # 8. STREAMLIT MAIN APPLICATION INTERFACE
 # -----------------------------------------------------------------------------
 st.markdown('<div class="main-header">🚜 Auto-Invoice Generator for Farm Produce</div>', unsafe_allow_html=True)
-st.markdown('<div class="sub-header">Upload an incoming PDF item list to parse products and generate a Maharashtra GST Tax Invoice instantly.</div>', unsafe_allow_html=True)
+st.markdown('<div class="sub-header">Upload a Packaging Report XLSX to parse products and generate a Maharashtra GST Tax Invoice instantly.</div>', unsafe_allow_html=True)
 
 price_master_df = load_price_master(sheet_url)
 
 if price_master_df is not None:
-    uploaded_pdf = st.file_uploader("Drop PDF Item List Report here", type=["pdf"])
+    uploaded_file = st.file_uploader("Drop Packaging Report XLSX here", type=["xlsx", "xls"])
 
-    if uploaded_pdf is not None:
-        st.info("Parsing multi-column PDF and matching items against Price Master...")
-        
-        extracted_items = parse_pdf_items(uploaded_pdf)
-        
+    if uploaded_file is not None:
+        st.info("Parsing XLSX Packaging Report and matching items against Price Master...")
+        extracted_items = parse_xlsx_items(uploaded_file)
+
         if not extracted_items:
-            st.error("No items could be extracted from the PDF. Please check the PDF format.")
+            st.error("No items could be extracted from the file. Please check its format.")
         else:
             # Column mapping check for Price Master
             pname_col = "PRODUCT NAME" if "PRODUCT NAME" in price_master_df.columns else price_master_df.columns[1]
@@ -561,11 +565,12 @@ if price_master_df is not None:
                 raw_name = item["raw_name"]
                 qty = item["qty"]
                 
-                best_match = find_best_match(raw_name, master_product_list)
-                
+                closest_item, closest_ratio = _score_candidates(raw_name, master_product_list)
+                best_match = closest_item if closest_ratio >= MATCH_CUTOFF else None
+
                 if best_match:
                     row_data = price_master_df[price_master_df[pname_col] == best_match].iloc[0]
-                    
+
                     # Clean price and tax rates
                     rate = float(str(row_data[price_col]).replace("₹", "").replace(",", "").strip())
                     gst_p = float(str(row_data[gst_col]).replace("%", "").strip())
@@ -573,7 +578,11 @@ if price_master_df is not None:
                     uom_val = str(row_data[uom_col])
                     desc_val = str(row_data[pname_col])
                 else:
-                    unmatched_items.append(raw_name)
+                    if closest_item:
+                        reason = f"Not found in price sheet. Closest match: {closest_item}"
+                    else:
+                        reason = "Not found in price sheet. No similar item found."
+                    unmatched_items.append({"name": raw_name, "qty": qty, "reason": reason})
                     rate = 40.0
                     gst_p = 0.0
                     hsn_val = "0709"
@@ -613,9 +622,9 @@ if price_master_df is not None:
                 })
 
             # Consolidate duplicate line items: the same product can appear on
-            # multiple rows/columns of the source PDF (e.g. split across lots),
-            # which previously produced repeated S.No rows for one product
-            # instead of a single row with the combined quantity.
+            # multiple rows of the source report, which previously produced
+            # repeated S.No rows for one product instead of a single row with
+            # the combined quantity.
             consolidated_rows = {}
             consolidation_order = []
             for row in processed_rows:
@@ -638,7 +647,11 @@ if price_master_df is not None:
             st.dataframe(df_display, use_container_width=True)
 
             if unmatched_items:
-                st.warning(f"⚠️ {len(unmatched_items)} items were matched using default fallback rates: {', '.join(unmatched_items[:10])}...")
+                st.warning(
+                    f"⚠️ {len(unmatched_items)} items were priced using default fallback "
+                    "rates because they didn't confidently match the price master. "
+                    "See the full list at the bottom of this page."
+                )
 
             grand_total_pre = total_taxable + total_cgst + total_sgst
             rounded_total = round(grand_total_pre)
@@ -664,3 +677,17 @@ if price_master_df is not None:
                     file_name=f"Tax_Invoice_{inv_number.replace('/', '_')}.pdf",
                     mime="application/pdf"
                 )
+
+            if unmatched_items:
+                st.markdown("---")
+                st.subheader(f"⚠️ Items Needing Price Master Attention ({len(unmatched_items)})")
+                st.caption(
+                    "These items didn't confidently match a product in the Google Sheet "
+                    "price master, so the invoice above priced them using a default "
+                    "fallback rate. Add or rename these in the price master sheet, then "
+                    "re-upload the report to get correct pricing."
+                )
+                unmatched_df = pd.DataFrame(unmatched_items).rename(
+                    columns={"name": "Item", "qty": "Qty", "reason": "Why no match"}
+                )
+                st.dataframe(unmatched_df, use_container_width=True, hide_index=True)
