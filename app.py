@@ -113,8 +113,14 @@ def parse_pdf_items(uploaded_file):
             name_clean = re.sub(r"^[^\w\u0900-\u097F]+", "", name_clean)
             name_clean = re.sub(r"[^\w\u0900-\u097F)]+$", "", name_clean).strip()
             
-            # Skip noise tokens
-            if name_clean.lower() in ['order', 'retail', 'gm+less', 'gm', 'piece punnet', 'kg each', 'rs', 'total']:
+            # Skip noise tokens (including bare unit words that get split off as
+            # if they were their own item, e.g. a stray "KG O" fragment)
+            noise_tokens = [
+                'order', 'retail', 'gm+less', 'gm', 'gms', 'piece punnet', 'kg each',
+                'rs', 'total', 'kg', 'kgs', 'kg o', 'pcs', 'ltr', 'ltrs', 'litre',
+                'litres', 'dozen', 'bunch', 'bottle', 'packet', 'bag', 'punnet', 'box'
+            ]
+            if name_clean.lower() in noise_tokens:
                 continue
                 
             qty_int = int(qty)
@@ -147,8 +153,11 @@ def find_best_match(query, master_list):
                 if p_sub in str(item).lower():
                     return item
                     
-    # 3. Fuzzy match fallback
-    matches = difflib.get_close_matches(query, [str(m) for m in master_list], n=1, cutoff=0.3)
+    # 3. Fuzzy match fallback (skip very short/ambiguous fragments, which are
+    # prone to matching unrelated products on noise like stray unit tokens)
+    if len(query.strip()) < 3:
+        return None
+    matches = difflib.get_close_matches(query, [str(m) for m in master_list], n=1, cutoff=0.4)
     if matches:
         return matches[0]
         
@@ -481,6 +490,26 @@ if price_master_df is not None:
                     "SGST Amt": sgst_amt,
                     "Total": item_total
                 })
+
+            # Consolidate duplicate line items: the same product can appear on
+            # multiple rows/columns of the source PDF (e.g. split across lots),
+            # which previously produced repeated S.No rows for one product
+            # instead of a single row with the combined quantity.
+            consolidated_rows = {}
+            consolidation_order = []
+            for row in processed_rows:
+                dedupe_key = (row["Description"], row["HSN"], row["UOM"], row["Rate"])
+                if dedupe_key not in consolidated_rows:
+                    consolidated_rows[dedupe_key] = dict(row)
+                    consolidation_order.append(dedupe_key)
+                else:
+                    existing = consolidated_rows[dedupe_key]
+                    existing["Qty"] += row["Qty"]
+                    existing["Taxable Value"] += row["Taxable Value"]
+                    existing["CGST Amt"] += row["CGST Amt"]
+                    existing["SGST Amt"] += row["SGST Amt"]
+                    existing["Total"] += row["Total"]
+            processed_rows = [consolidated_rows[k] for k in consolidation_order]
 
             df_display = pd.DataFrame(processed_rows)
 
