@@ -4,6 +4,8 @@ import pdfplumber
 import re
 import difflib
 import io
+import json
+import os
 import pypdf
 
 # -----------------------------------------------------------------------------
@@ -28,12 +30,46 @@ st.markdown("""
 # -----------------------------------------------------------------------------
 st.sidebar.title("📄 Invoice & Company Details")
 
-# Default Published Google Sheet CSV URL (Update if needed)
-DEFAULT_SHEET_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vSmXqY9tG7gW8qE8v6/pub?output=csv"
+# Company/sheet details are persisted to a small local JSON file so that the
+# sidebar fields stay pre-filled next time the app is opened, instead of
+# resetting to the hard-coded defaults and requiring the user to retype them.
+CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "invoice_config.json")
+
+FALLBACK_CONFIG = {
+    "sheet_url": "https://docs.google.com/spreadsheets/d/12a9031ezxQ2GTVyULyw-ddpEfVUYm0rkC4dthS-i68Q/export?format=csv",
+    "supplier_name": "Ekrushak Farm Fresh Pvt Ltd",
+    "supplier_address": "Milkat No.635, Wadgaon Anand, Tal- Junnar, Dist-Pune 412411",
+    "supplier_gstin": "27AAJCE4239R1ZX",
+    "buyer_name": "Farm Fresh",
+    "buyer_address": "Milkat no- 635, Wadgaon Anand, Tal- Junnar, Dist-Pune 412411",
+    "buyer_gstin": "27AKYPD1464B1Z7",
+}
+
+def load_saved_config():
+    """Load previously saved company details, falling back to defaults for
+    any field that hasn't been saved yet."""
+    config = FALLBACK_CONFIG.copy()
+    if os.path.exists(CONFIG_FILE):
+        try:
+            with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+                config.update(json.load(f))
+        except Exception:
+            pass
+    return config
+
+def save_config(values):
+    try:
+        with open(CONFIG_FILE, "w", encoding="utf-8") as f:
+            json.dump(values, f, ensure_ascii=False, indent=2)
+        return True
+    except Exception:
+        return False
+
+saved_config = load_saved_config()
 
 sheet_url = st.sidebar.text_input(
-    "Google Sheet Price Master CSV URL", 
-    value="https://docs.google.com/spreadsheets/d/12a9031ezxQ2GTVyULyw-ddpEfVUYm0rkC4dthS-i68Q/export?format=csv",
+    "Google Sheet Price Master CSV URL",
+    value=saved_config["sheet_url"],
     help="Published CSV URL of your Google Sheet Price List"
 )
 
@@ -41,14 +77,29 @@ inv_number = st.sidebar.text_input("Invoice Number", "INV/2026-27/0842")
 inv_date = st.sidebar.date_input("Invoice Date")
 
 st.sidebar.subheader("Supplier (Company A)")
-supplier_name = st.sidebar.text_input("Supplier Name", "Ekrushak Farm Fresh Pvt Ltd")
-supplier_address = st.sidebar.text_input("Supplier Address", "Milkat No.635, Wadgaon Anand, Tal- Junnar, Dist-Pune 412411")
-supplier_gstin = st.sidebar.text_input("Supplier GSTIN", "27AAJCE4239R1ZX")
+supplier_name = st.sidebar.text_input("Supplier Name", saved_config["supplier_name"])
+supplier_address = st.sidebar.text_input("Supplier Address", saved_config["supplier_address"])
+supplier_gstin = st.sidebar.text_input("Supplier GSTIN", saved_config["supplier_gstin"])
 
 st.sidebar.subheader("Billed To (Company B)")
-buyer_name = st.sidebar.text_input("Buyer Name", "Farm Fresh")
-buyer_address = st.sidebar.text_input("Buyer Address", "Milkat no- 635, Wadgaon Anand, Tal- Junnar, Dist-Pune 412411")
-buyer_gstin = st.sidebar.text_input("Buyer GSTIN", "27AKYPD1464B1Z7")
+buyer_name = st.sidebar.text_input("Buyer Name", saved_config["buyer_name"])
+buyer_address = st.sidebar.text_input("Buyer Address", saved_config["buyer_address"])
+buyer_gstin = st.sidebar.text_input("Buyer GSTIN", saved_config["buyer_gstin"])
+
+if st.sidebar.button("💾 Save as Default for Next Time"):
+    saved_ok = save_config({
+        "sheet_url": sheet_url,
+        "supplier_name": supplier_name,
+        "supplier_address": supplier_address,
+        "supplier_gstin": supplier_gstin,
+        "buyer_name": buyer_name,
+        "buyer_address": buyer_address,
+        "buyer_gstin": buyer_gstin,
+    })
+    if saved_ok:
+        st.sidebar.success("Saved. These details will be pre-filled next time.")
+    else:
+        st.sidebar.error("Could not save details on this server.")
 
 # -----------------------------------------------------------------------------
 # 3. PRICE MASTER DATA LOADER
