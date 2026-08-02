@@ -6,6 +6,8 @@ import difflib
 import io
 import json
 import os
+import base64
+import requests
 import pypdf
 
 # -----------------------------------------------------------------------------
@@ -30,9 +32,18 @@ st.markdown("""
 # -----------------------------------------------------------------------------
 st.sidebar.title("📄 Invoice & Company Details")
 
-# Company/sheet details are persisted to a small local JSON file so that the
-# sidebar fields stay pre-filled next time the app is opened, instead of
-# resetting to the hard-coded defaults and requiring the user to retype them.
+# Company/sheet details are persisted to invoice_config.json inside this same
+# GitHub repo (via the GitHub Contents API), so the sidebar stays pre-filled
+# across app restarts AND full redeploys - not just within one running
+# container. If no GitHub token is configured (e.g. running locally), we
+# fall back to a local JSON file that only survives within that session.
+GITHUB_OWNER = "amoalsale"
+GITHUB_REPO = "krushak"
+GITHUB_BRANCH = "master"
+CONFIG_PATH_IN_REPO = "invoice_config.json"
+GITHUB_RAW_URL = f"https://raw.githubusercontent.com/{GITHUB_OWNER}/{GITHUB_REPO}/{GITHUB_BRANCH}/{CONFIG_PATH_IN_REPO}"
+GITHUB_API_URL = f"https://api.github.com/repos/{GITHUB_OWNER}/{GITHUB_REPO}/contents/{CONFIG_PATH_IN_REPO}"
+
 CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "invoice_config.json")
 
 FALLBACK_CONFIG = {
@@ -45,10 +56,32 @@ FALLBACK_CONFIG = {
     "buyer_gstin": "27AKYPD1464B1Z7",
 }
 
+def _get_github_token():
+    try:
+        return st.secrets.get("GITHUB_TOKEN")
+    except Exception:
+        return None
+
+def _save_local(values):
+    try:
+        with open(CONFIG_FILE, "w", encoding="utf-8") as f:
+            json.dump(values, f, ensure_ascii=False, indent=2)
+        return True
+    except Exception:
+        return False
+
 def load_saved_config():
-    """Load previously saved company details, falling back to defaults for
-    any field that hasn't been saved yet."""
+    """Load previously saved company details. Tries the copy committed in the
+    GitHub repo first (public read, no token needed, survives redeploys),
+    then the local file, then falls back to defaults for anything missing."""
     config = FALLBACK_CONFIG.copy()
+    try:
+        resp = requests.get(GITHUB_RAW_URL, timeout=5)
+        if resp.status_code == 200:
+            config.update(resp.json())
+            return config
+    except Exception:
+        pass
     if os.path.exists(CONFIG_FILE):
         try:
             with open(CONFIG_FILE, "r", encoding="utf-8") as f:
@@ -58,12 +91,42 @@ def load_saved_config():
     return config
 
 def save_config(values):
+    """Persist config. Writes to the GitHub repo (survives redeploys) when a
+    GITHUB_TOKEN secret is configured; always also writes the local file as a
+    same-session cache/fallback."""
+    _save_local(values)
+
+    token = _get_github_token()
+    if not token:
+        return True, "local"
+
     try:
-        with open(CONFIG_FILE, "w", encoding="utf-8") as f:
-            json.dump(values, f, ensure_ascii=False, indent=2)
-        return True
+        headers = {
+            "Authorization": f"token {token}",
+            "Accept": "application/vnd.github+json",
+        }
+        get_resp = requests.get(
+            GITHUB_API_URL, headers=headers, params={"ref": GITHUB_BRANCH}, timeout=10
+        )
+        sha = get_resp.json().get("sha") if get_resp.status_code == 200 else None
+
+        content_b64 = base64.b64encode(
+            json.dumps(values, ensure_ascii=False, indent=2).encode("utf-8")
+        ).decode("utf-8")
+        payload = {
+            "message": "Update saved invoice config",
+            "content": content_b64,
+            "branch": GITHUB_BRANCH,
+        }
+        if sha:
+            payload["sha"] = sha
+
+        put_resp = requests.put(GITHUB_API_URL, headers=headers, json=payload, timeout=10)
+        if put_resp.status_code in (200, 201):
+            return True, "github"
+        return True, "local"
     except Exception:
-        return False
+        return True, "local"
 
 saved_config = load_saved_config()
 
@@ -87,7 +150,7 @@ buyer_address = st.sidebar.text_input("Buyer Address", saved_config["buyer_addre
 buyer_gstin = st.sidebar.text_input("Buyer GSTIN", saved_config["buyer_gstin"])
 
 if st.sidebar.button("💾 Save as Default for Next Time"):
-    saved_ok = save_config({
+    saved_ok, saved_where = save_config({
         "sheet_url": sheet_url,
         "supplier_name": supplier_name,
         "supplier_address": supplier_address,
@@ -96,8 +159,13 @@ if st.sidebar.button("💾 Save as Default for Next Time"):
         "buyer_address": buyer_address,
         "buyer_gstin": buyer_gstin,
     })
-    if saved_ok:
-        st.sidebar.success("Saved. These details will be pre-filled next time.")
+    if saved_ok and saved_where == "github":
+        st.sidebar.success("Saved to GitHub — these details will persist across redeploys.")
+    elif saved_ok:
+        st.sidebar.warning(
+            "Saved for this session only. Add a GITHUB_TOKEN secret in "
+            "Streamlit Cloud's app settings to make this permanent across redeploys."
+        )
     else:
         st.sidebar.error("Could not save details on this server.")
 
