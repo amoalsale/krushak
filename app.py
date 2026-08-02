@@ -41,12 +41,14 @@ inv_number = st.sidebar.text_input("Invoice Number", "INV/2026-27/0842")
 inv_date = st.sidebar.date_input("Invoice Date")
 
 st.sidebar.subheader("Supplier (Company A)")
-supplier_name = st.sidebar.text_input("Supplier Name", "COMPANY A PRIVATE LIMITED")
-supplier_gstin = st.sidebar.text_input("Supplier GSTIN", "27AAAAA1111A1Z1")
+supplier_name = st.sidebar.text_input("Supplier Name", "Ekrushak Farm Fresh Pvt Ltd")
+supplier_address = st.sidebar.text_input("Supplier Address", "Milkat No.635, Wadgaon Anand, Tal- Junnar, Dist-Pune 412411")
+supplier_gstin = st.sidebar.text_input("Supplier GSTIN", "27AAJCE4239R1ZX")
 
 st.sidebar.subheader("Billed To (Company B)")
-buyer_name = st.sidebar.text_input("Buyer Name", "COMPANY B LOGISTICS & RETAIL LTD")
-buyer_gstin = st.sidebar.text_input("Buyer GSTIN", "27BBBBB2222B1Z2")
+buyer_name = st.sidebar.text_input("Buyer Name", "Farm Fresh")
+buyer_address = st.sidebar.text_input("Buyer Address", "Milkat no- 635, Wadgaon Anand, Tal- Junnar, Dist-Pune 412411")
+buyer_gstin = st.sidebar.text_input("Buyer GSTIN", "27AKYPD1464B1Z7")
 
 # -----------------------------------------------------------------------------
 # 3. PRICE MASTER DATA LOADER
@@ -268,7 +270,7 @@ def generate_pdf_bytes(df_rows, total_taxable, total_cgst, total_sgst, rounded_t
                 <td style="width: 50%; vertical-align: top;">
                     <div class="bold" style="font-size: 9pt; color: #1a365d;">SUPPLIER DETAILS</div>
                     <div class="bold">{supplier_name}</div>
-                    <div>District Pune, Maharashtra - 412303</div>
+                    <div>{supplier_address}</div>
                     <div><strong>GSTIN:</strong> {supplier_gstin} | <strong>State:</strong> Maharashtra (27)</div>
                 </td>
                 <td style="width: 50%; vertical-align: top;">
@@ -282,13 +284,13 @@ def generate_pdf_bytes(df_rows, total_taxable, total_cgst, total_sgst, rounded_t
                 <td style="vertical-align: top;">
                     <div class="bold" style="font-size: 9pt; color: #1a365d;">BILLED TO</div>
                     <div class="bold">{buyer_name}</div>
-                    <div>Mumbai, Maharashtra - 400093</div>
+                    <div>{buyer_address}</div>
                     <div><strong>GSTIN:</strong> {buyer_gstin} | <strong>State:</strong> Maharashtra (27)</div>
                 </td>
                 <td style="vertical-align: top;">
                     <div class="bold" style="font-size: 9pt; color: #1a365d;">SHIPPED TO</div>
-                    <div class="bold">{buyer_name} Fulfillment Center</div>
-                    <div>Wagholi Logistics Park, Pune, Maharashtra - 412207</div>
+                    <div class="bold">{buyer_name}</div>
+                    <div>{buyer_address}</div>
                 </td>
             </tr>
         </table>
