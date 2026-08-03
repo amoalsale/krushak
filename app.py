@@ -6,6 +6,7 @@ import json
 import os
 import base64
 import requests
+import datetime
 
 # -----------------------------------------------------------------------------
 # 1. PAGE CONFIGURATION & STYLING
@@ -154,7 +155,7 @@ sheet_url = st.sidebar.text_input(
 )
 
 inv_number = st.sidebar.text_input("Invoice Number", "INV/2026-27/0842")
-inv_date = st.sidebar.date_input("Invoice Date")
+inv_date = st.sidebar.date_input("Invoice Date") or datetime.date.today()
 
 st.sidebar.subheader("Supplier (Company A)")
 supplier_name = st.sidebar.text_input("Supplier Name", saved_config["supplier_name"])
@@ -213,14 +214,39 @@ if st.sidebar.button("💾 Save as Default for Next Time"):
 # -----------------------------------------------------------------------------
 @st.cache_data(ttl=300)
 def load_price_master(url):
+    if not url or not url.strip():
+        st.error("Please enter a Google Sheet Price Master CSV URL in the sidebar.")
+        return None
+
     try:
         df = pd.read_csv(url)
-        # Standardize column headers
-        df.columns = [c.strip().upper() for c in df.columns]
-        return df
     except Exception as e:
-        st.error(f"Error loading Price Master from Google Sheet: {e}")
+        st.error(
+            f"Could not load the Price Master from the Google Sheet URL: {e}\n\n"
+            "Check that the URL is a valid published-CSV export link and that the sheet is publicly viewable."
+        )
         return None
+
+    if df.empty or len(df.columns) == 0:
+        st.error(
+            "The Price Master sheet loaded but appears to be empty. Please check that the "
+            "Google Sheet has data and is published as CSV (File → Share → Publish to web)."
+        )
+        return None
+
+    df.columns = [c.strip().upper() for c in df.columns]
+    return df
+
+def resolve_required_column(df, preferred_name, fallback_index):
+    """Looks up `preferred_name` in df's columns (already upper-cased), or
+    falls back to a column by position for older sheets that don't use the
+    exact expected header. Returns None if neither is available, so the
+    caller can show a clear error instead of an IndexError/KeyError."""
+    if preferred_name in df.columns:
+        return preferred_name
+    if fallback_index is not None and fallback_index < len(df.columns):
+        return df.columns[fallback_index]
+    return None
 
 # -----------------------------------------------------------------------------
 # 4. PACKAGING REPORT XLSX PARSER
@@ -228,16 +254,36 @@ def load_price_master(url):
 
 def parse_xlsx_items(uploaded_file):
     """Extracts Item Names and Quantities from a packaging-report XLSX/XLS
-    export with 'Product' and 'Quantity' columns."""
-    uploaded_file.seek(0)
-    df = pd.read_excel(uploaded_file)
+    export with 'Product' and 'Quantity' columns.
 
-    product_col = next(
-        (c for c in df.columns if str(c).strip().lower() == "product"), df.columns[0]
-    )
-    qty_col = next(
-        (c for c in df.columns if str(c).strip().lower() == "quantity"), df.columns[1]
-    )
+    Returns (extracted, used_fallback_columns) - used_fallback_columns is
+    True when the sheet didn't have columns named exactly 'Product'/
+    'Quantity' and the first two columns were used instead, so the caller
+    can warn the user to double-check the file when that happens.
+
+    Raises ValueError with a user-facing message if the file can't be read
+    as a spreadsheet, or doesn't have enough columns.
+    """
+    uploaded_file.seek(0)
+    try:
+        df = pd.read_excel(uploaded_file)
+    except Exception as e:
+        raise ValueError(
+            f"Could not read this file as an Excel spreadsheet ({e}). Please make sure it's "
+            "a valid, non-password-protected .xlsx or .xls file."
+        )
+
+    if len(df.columns) < 2:
+        raise ValueError(
+            "This file doesn't have enough columns - a packaging report needs at least a "
+            "Product column and a Quantity column."
+        )
+
+    product_col = next((c for c in df.columns if str(c).strip().lower() == "product"), None)
+    qty_col = next((c for c in df.columns if str(c).strip().lower() == "quantity"), None)
+    used_fallback_columns = product_col is None or qty_col is None
+    product_col = product_col if product_col is not None else df.columns[0]
+    qty_col = qty_col if qty_col is not None else df.columns[1]
 
     extracted = []
     for _, row in df.iterrows():
@@ -252,7 +298,7 @@ def parse_xlsx_items(uploaded_file):
         if len(name_clean) > 1 and qty_int > 0:
             extracted.append({"raw_name": name_clean, "qty": qty_int})
 
-    return extracted
+    return extracted, used_fallback_columns
 # -----------------------------------------------------------------------------
 # 5. BILINGUAL SMART ITEM MATCHER
 # -----------------------------------------------------------------------------
@@ -559,7 +605,11 @@ def generate_pdf_bytes(df_rows, total_taxable, total_cgst, total_sgst, rounded_t
             pisa.CreatePDF(html_content, dest=pdf_buffer)
             return pdf_buffer.getvalue()
         except Exception as e:
-            st.error(f"PDF Generation failed. Please install xhtml2pdf or weasyprint: {e}")
+            st.error(
+                f"Could not generate the invoice PDF due to a server-side rendering error ({e}). "
+                "The extracted line items above are still accurate - please try again, and "
+                "contact the app administrator if this keeps happening."
+            )
             return None
 
 # -----------------------------------------------------------------------------
@@ -571,20 +621,47 @@ st.markdown('<div class="sub-header">Upload a Packaging Report XLSX to parse pro
 price_master_df = load_price_master(sheet_url)
 
 if price_master_df is not None:
+    pname_col = resolve_required_column(price_master_df, "PRODUCT NAME", 1)
+    uom_col = resolve_required_column(price_master_df, "UOM", 4)
+    price_col = (
+        resolve_required_column(price_master_df, "UNIT PRICE (INR)", None)
+        or resolve_required_column(price_master_df, "UNIT PRICE", None)
+    )
+
+    missing_cols = [
+        name for name, col in [
+            ("PRODUCT NAME", pname_col), ("UOM", uom_col), ("UNIT PRICE (INR)", price_col)
+        ] if col is None
+    ]
+    if missing_cols:
+        st.error(
+            f"The Price Master sheet is missing required column(s): {', '.join(missing_cols)}. "
+            "Please check the Google Sheet has PRODUCT NAME, UOM, and UNIT PRICE (INR) columns."
+        )
+        st.stop()
+
     uploaded_file = st.file_uploader("Drop Packaging Report XLSX here", type=["xlsx", "xls"])
 
     if uploaded_file is not None:
         st.info("Parsing XLSX Packaging Report and matching items against Price Master...")
-        extracted_items = parse_xlsx_items(uploaded_file)
+        parse_error = None
+        extracted_items, used_fallback_columns = [], False
+        try:
+            extracted_items, used_fallback_columns = parse_xlsx_items(uploaded_file)
+        except ValueError as e:
+            parse_error = str(e)
 
-        if not extracted_items:
+        if parse_error:
+            st.error(parse_error)
+        elif not extracted_items:
             st.error("No items could be extracted from the file. Please check its format.")
         else:
-            # Column mapping check for Price Master
-            pname_col = "PRODUCT NAME" if "PRODUCT NAME" in price_master_df.columns else price_master_df.columns[1]
-            uom_col = "UOM" if "UOM" in price_master_df.columns else price_master_df.columns[4]
-            price_col = "UNIT PRICE (INR)" if "UNIT PRICE (INR)" in price_master_df.columns else "UNIT PRICE"
-
+            if used_fallback_columns:
+                st.warning(
+                    "This file doesn't have columns named 'Product' and 'Quantity', so the "
+                    "first two columns were used instead. Please double-check the extracted "
+                    "items below match what you expect."
+                )
             master_product_list = price_master_df[pname_col].dropna().tolist()
 
             processed_rows = []
@@ -606,18 +683,26 @@ if price_master_df is not None:
                 # every line item), not read per-item from the price master.
                 gst_p = gst_rate
 
+                reason = None
                 if best_match:
                     row_data = price_master_df[price_master_df[pname_col] == best_match].iloc[0]
+                    try:
+                        rate = float(str(row_data[price_col]).replace("₹", "").replace(",", "").strip())
+                        uom_val = str(row_data[uom_col])
+                        desc_val = str(row_data[pname_col])
+                    except (TypeError, ValueError):
+                        # Matched a product, but its price cell in the sheet
+                        # is missing/non-numeric - treat as unmatched rather
+                        # than crashing the whole invoice generation.
+                        best_match = None
+                        reason = f'Matched "{closest_item}" in the price sheet, but its price is missing or not a valid number.'
 
-                    # Clean price
-                    rate = float(str(row_data[price_col]).replace("₹", "").replace(",", "").strip())
-                    uom_val = str(row_data[uom_col])
-                    desc_val = str(row_data[pname_col])
-                else:
-                    if closest_item:
-                        reason = f"Not found in price sheet. Closest match: {closest_item}"
-                    else:
-                        reason = "Not found in price sheet. No similar item found."
+                if not best_match:
+                    if reason is None:
+                        if closest_item:
+                            reason = f"Not found in price sheet. Closest match: {closest_item}"
+                        else:
+                            reason = "Not found in price sheet. No similar item found."
                     unmatched_items.append({"name": raw_name, "qty": qty, "reason": reason})
                     rate = 40.0
                     uom_val = "Kg"
