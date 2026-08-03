@@ -51,6 +51,7 @@ FALLBACK_CONFIG = {
     "buyer_name": "Farm Fresh",
     "buyer_address": "Milkat no- 635, Wadgaon Anand, Tal- Junnar, Dist-Pune 412411",
     "buyer_gstin": "27AKYPD1464B1Z7",
+    "gst_rate": 0.0,
 }
 
 def _get_github_token():
@@ -146,6 +147,17 @@ buyer_name = st.sidebar.text_input("Buyer Name", saved_config["buyer_name"])
 buyer_address = st.sidebar.text_input("Buyer Address", saved_config["buyer_address"])
 buyer_gstin = st.sidebar.text_input("Buyer GSTIN", saved_config["buyer_gstin"])
 
+st.sidebar.subheader("Tax Settings")
+gst_rate = st.sidebar.number_input(
+    "GST Rate (%)",
+    min_value=0.0,
+    max_value=100.0,
+    value=float(saved_config["gst_rate"]),
+    step=0.5,
+    format="%.2f",
+    help="Applied to every line item on the invoice, overriding the price master sheet's own GST RATE column."
+)
+
 if st.sidebar.button("💾 Save as Default for Next Time"):
     saved_ok, saved_where = save_config({
         "sheet_url": sheet_url,
@@ -155,6 +167,7 @@ if st.sidebar.button("💾 Save as Default for Next Time"):
         "buyer_name": buyer_name,
         "buyer_address": buyer_address,
         "buyer_gstin": buyer_gstin,
+        "gst_rate": gst_rate,
     })
     if saved_ok and saved_where == "github":
         st.sidebar.success("Saved to GitHub — these details will persist across redeploys.")
@@ -549,7 +562,6 @@ if price_master_df is not None:
             hsn_col = "HSN CODE" if "HSN CODE" in price_master_df.columns else "HSN"
             uom_col = "UOM" if "UOM" in price_master_df.columns else price_master_df.columns[4]
             price_col = "UNIT PRICE (INR)" if "UNIT PRICE (INR)" in price_master_df.columns else "UNIT PRICE"
-            gst_col = "GST RATE (%)" if "GST RATE (%)" in price_master_df.columns else "GST RATE"
 
             master_product_list = price_master_df[pname_col].dropna().tolist()
 
@@ -568,12 +580,15 @@ if price_master_df is not None:
                 closest_item, closest_ratio = _score_candidates(raw_name, master_product_list)
                 best_match = closest_item if closest_ratio >= MATCH_CUTOFF else None
 
+                # GST rate is a global override from the sidebar (applies to
+                # every line item), not read per-item from the price master.
+                gst_p = gst_rate
+
                 if best_match:
                     row_data = price_master_df[price_master_df[pname_col] == best_match].iloc[0]
 
-                    # Clean price and tax rates
+                    # Clean price
                     rate = float(str(row_data[price_col]).replace("₹", "").replace(",", "").strip())
-                    gst_p = float(str(row_data[gst_col]).replace("%", "").strip())
                     hsn_val = str(row_data[hsn_col]).split(".")[0]
                     uom_val = str(row_data[uom_col])
                     desc_val = str(row_data[pname_col])
@@ -584,7 +599,6 @@ if price_master_df is not None:
                         reason = "Not found in price sheet. No similar item found."
                     unmatched_items.append({"name": raw_name, "qty": qty, "reason": reason})
                     rate = 40.0
-                    gst_p = 0.0
                     hsn_val = "0709"
                     uom_val = "Kg"
                     desc_val = raw_name
