@@ -54,6 +54,25 @@ FALLBACK_CONFIG = {
     "gst_rate": 0.0,
 }
 
+# -----------------------------------------------------------------------------
+# INVOICE LINE-ITEM COLUMN DEFINITIONS
+# -----------------------------------------------------------------------------
+# S.No and Description are always shown; the rest are optional via the
+# sidebar "Invoice Columns" control, which applies to both the on-screen
+# preview table and the downloaded PDF.
+OPTIONAL_INVOICE_COLUMNS = [
+    {"key": "Qty", "label": "Qty", "width": 5, "align": "right"},
+    {"key": "UOM", "label": "UOM", "width": 6, "align": "center"},
+    {"key": "Rate", "label": "Rate (₹)", "width": 8, "align": "right", "money": True},
+    {"key": "Taxable Value", "label": "Taxable Value", "width": 9, "align": "right", "money": True},
+    {"key": "CGST Rate", "label": "CGST %", "width": 5, "align": "center"},
+    {"key": "CGST Amt", "label": "CGST Amt", "width": 7, "align": "right", "money": True},
+    {"key": "SGST Rate", "label": "SGST %", "width": 5, "align": "center"},
+    {"key": "SGST Amt", "label": "SGST Amt", "width": 7, "align": "right", "money": True},
+    {"key": "Total", "label": "Total (₹)", "width": 9, "align": "right", "money": True},
+]
+SUMMABLE_COLUMN_KEYS = {"Qty", "Taxable Value", "CGST Amt", "SGST Amt", "Total"}
+
 def _get_github_token():
     try:
         return st.secrets.get("GITHUB_TOKEN")
@@ -157,6 +176,16 @@ gst_rate = st.sidebar.number_input(
     format="%.2f",
     help="Applied to every line item on the invoice, overriding the price master sheet's own GST RATE column."
 )
+
+st.sidebar.subheader("Invoice Columns")
+_optional_column_keys = [c["key"] for c in OPTIONAL_INVOICE_COLUMNS]
+selected_column_keys = st.sidebar.multiselect(
+    "Columns to show on the invoice",
+    options=_optional_column_keys,
+    default=_optional_column_keys,
+    help="S.No and Description are always shown. Applies to both the on-screen preview and the downloaded PDF."
+)
+visible_columns = [c for c in OPTIONAL_INVOICE_COLUMNS if c["key"] in selected_column_keys]
 
 if st.sidebar.button("💾 Save as Default for Next Time"):
     saved_ok, saved_where = save_config({
@@ -343,26 +372,50 @@ def number_to_words(n):
 # -----------------------------------------------------------------------------
 # 7. INVOICE PDF GENERATOR (Cross-Platform)
 # -----------------------------------------------------------------------------
-def generate_pdf_bytes(df_rows, total_taxable, total_cgst, total_sgst, rounded_total, round_off, gst_summary):
-    
+def generate_pdf_bytes(df_rows, total_taxable, total_cgst, total_sgst, rounded_total, round_off, gst_summary, visible_columns):
+
+    def cell_value(row, col):
+        val = row[col["key"]]
+        return f"{val:,.2f}" if col.get("money") else val
+
     rows_html = ""
     for idx, row in enumerate(df_rows, start=1):
-        rows_html += f"""
-        <tr>
-            <td style="text-align: center;">{idx}</td>
-            <td>{row['Description']}</td>
-            <td style="text-align: center;">{row['HSN']}</td>
-            <td style="text-align: center;">{row['UOM']}</td>
-            <td style="text-align: right;">{row['Qty']}</td>
-            <td style="text-align: right;">{row['Rate']:,.2f}</td>
-            <td style="text-align: right;">{row['Taxable Value']:,.2f}</td>
-            <td style="text-align: center;">{row['CGST Rate']}</td>
-            <td style="text-align: right;">{row['CGST Amt']:,.2f}</td>
-            <td style="text-align: center;">{row['SGST Rate']}</td>
-            <td style="text-align: right;">{row['SGST Amt']:,.2f}</td>
-            <td style="text-align: right;">{row['Total']:,.2f}</td>
-        </tr>
-        """
+        cells = f'<td style="text-align: center;">{idx}</td><td>{row["Description"]}</td>'
+        for col in visible_columns:
+            cells += f'<td style="text-align: {col["align"]};">{cell_value(row, col)}</td>'
+        rows_html += f"<tr>{cells}</tr>\n"
+
+    # S.No + Description always get a fixed 4% / the remainder of the width;
+    # optional columns keep their own base width so the table stays
+    # proportioned however many of them are visible.
+    desc_width = 100 - 4 - sum(col["width"] for col in visible_columns)
+    colgroup_html = f'<col style="width: 4%;">\n<col style="width: {desc_width}%;">\n'
+    colgroup_html += "\n".join(f'<col style="width: {col["width"]}%;">' for col in visible_columns)
+
+    thead_html = f'<th style="width: 4%;">S.No</th><th style="width: {desc_width}%;">Description of Farm Produce</th>'
+    thead_html += "".join(f'<th style="width: {col["width"]}%;">{col["label"]}</th>' for col in visible_columns)
+
+    total_qty = sum(r["Qty"] for r in df_rows)
+    column_totals = {
+        "Qty": total_qty,
+        "Taxable Value": total_taxable,
+        "CGST Amt": total_cgst,
+        "SGST Amt": total_sgst,
+        "Total": total_taxable + total_cgst + total_sgst,
+    }
+    label_span = 0
+    for col in visible_columns:
+        if col["key"] in SUMMABLE_COLUMN_KEYS:
+            break
+        label_span += 1
+    totals_row_html = f'<td colspan="{2 + label_span}" style="text-align: right;">Total Gross Values</td>'
+    for col in visible_columns[label_span:]:
+        if col["key"] in SUMMABLE_COLUMN_KEYS:
+            value = column_totals[col["key"]]
+            formatted = f"{value:,.2f}" if col.get("money") else value
+            totals_row_html += f'<td style="text-align: right;">{formatted}</td>'
+        else:
+            totals_row_html += "<td></td>"
 
     summary_rows_html = ""
     for rate, data in gst_summary.items():
@@ -434,47 +487,17 @@ def generate_pdf_bytes(df_rows, total_taxable, total_cgst, total_sgst, rounded_t
 
         <table>
             <colgroup>
-                <col style="width: 4%;">
-                <col style="width: 28%;">
-                <col style="width: 7%;">
-                <col style="width: 6%;">
-                <col style="width: 5%;">
-                <col style="width: 8%;">
-                <col style="width: 9%;">
-                <col style="width: 5%;">
-                <col style="width: 7%;">
-                <col style="width: 5%;">
-                <col style="width: 7%;">
-                <col style="width: 9%;">
+                {colgroup_html}
             </colgroup>
             <thead>
                 <tr>
-                    <th style="width: 4%;">S.No</th>
-                    <th style="width: 28%;">Description of Farm Produce</th>
-                    <th style="width: 7%;">HSN</th>
-                    <th style="width: 6%;">UOM</th>
-                    <th style="width: 5%;">Qty</th>
-                    <th style="width: 8%;">Rate (₹)</th>
-                    <th style="width: 9%;">Taxable Value</th>
-                    <th style="width: 5%;">CGST %</th>
-                    <th style="width: 7%;">CGST Amt</th>
-                    <th style="width: 5%;">SGST %</th>
-                    <th style="width: 7%;">SGST Amt</th>
-                    <th style="width: 9%;">Total (₹)</th>
+                    {thead_html}
                 </tr>
             </thead>
             <tbody>
                 {rows_html}
                 <tr style="font-weight: bold; background-color: #edf2f7;">
-                    <td colspan="4" style="text-align: right;">Total Gross Values</td>
-                    <td style="text-align: right;">{sum(r['Qty'] for r in df_rows)}</td>
-                    <td></td>
-                    <td style="text-align: right;">{total_taxable:,.2f}</td>
-                    <td></td>
-                    <td style="text-align: right;">{total_cgst:,.2f}</td>
-                    <td></td>
-                    <td style="text-align: right;">{total_sgst:,.2f}</td>
-                    <td style="text-align: right;">{(total_taxable + total_cgst + total_sgst):,.2f}</td>
+                    {totals_row_html}
                 </tr>
             </tbody>
         </table>
@@ -559,7 +582,6 @@ if price_master_df is not None:
         else:
             # Column mapping check for Price Master
             pname_col = "PRODUCT NAME" if "PRODUCT NAME" in price_master_df.columns else price_master_df.columns[1]
-            hsn_col = "HSN CODE" if "HSN CODE" in price_master_df.columns else "HSN"
             uom_col = "UOM" if "UOM" in price_master_df.columns else price_master_df.columns[4]
             price_col = "UNIT PRICE (INR)" if "UNIT PRICE (INR)" in price_master_df.columns else "UNIT PRICE"
 
@@ -589,7 +611,6 @@ if price_master_df is not None:
 
                     # Clean price
                     rate = float(str(row_data[price_col]).replace("₹", "").replace(",", "").strip())
-                    hsn_val = str(row_data[hsn_col]).split(".")[0]
                     uom_val = str(row_data[uom_col])
                     desc_val = str(row_data[pname_col])
                 else:
@@ -599,7 +620,6 @@ if price_master_df is not None:
                         reason = "Not found in price sheet. No similar item found."
                     unmatched_items.append({"name": raw_name, "qty": qty, "reason": reason})
                     rate = 40.0
-                    hsn_val = "0709"
                     uom_val = "Kg"
                     desc_val = raw_name
 
@@ -623,9 +643,8 @@ if price_master_df is not None:
 
                 processed_rows.append({
                     "Description": desc_val,
-                    "HSN": hsn_val,
-                    "UOM": uom_val,
                     "Qty": qty,
+                    "UOM": uom_val,
                     "Rate": rate,
                     "Taxable Value": taxable,
                     "CGST Rate": f"{cgst_p:.1f}%",
@@ -642,7 +661,7 @@ if price_master_df is not None:
             consolidated_rows = {}
             consolidation_order = []
             for row in processed_rows:
-                dedupe_key = (row["Description"], row["HSN"], row["UOM"], row["Rate"])
+                dedupe_key = (row["Description"], row["UOM"], row["Rate"])
                 if dedupe_key not in consolidated_rows:
                     consolidated_rows[dedupe_key] = dict(row)
                     consolidation_order.append(dedupe_key)
@@ -655,7 +674,8 @@ if price_master_df is not None:
                     existing["Total"] += row["Total"]
             processed_rows = [consolidated_rows[k] for k in consolidation_order]
 
-            df_display = pd.DataFrame(processed_rows)
+            display_column_keys = ["Description"] + [c["key"] for c in visible_columns]
+            df_display = pd.DataFrame(processed_rows)[display_column_keys]
 
             st.subheader(f"Extracted Line Items ({len(df_display)} items extracted)")
             st.dataframe(df_display, use_container_width=True)
@@ -681,7 +701,8 @@ if price_master_df is not None:
 
             # Generate downloadable PDF
             pdf_data = generate_pdf_bytes(
-                processed_rows, total_taxable, total_cgst, total_sgst, rounded_total, round_off, gst_summary
+                processed_rows, total_taxable, total_cgst, total_sgst, rounded_total, round_off, gst_summary,
+                visible_columns
             )
 
             if pdf_data:
